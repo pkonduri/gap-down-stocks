@@ -1,0 +1,7 @@
+python-dotenv==1.0.0
+yfinance==0.2.18
+pandas==2.0.3
+requests==2.31.0
+resend==0.6.0
+schedule==1.2.0
+pytz==2023.3
