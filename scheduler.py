@@ -28,10 +28,12 @@ def job():
 def main():
     """Main scheduler loop"""
     print("Starting Gap Analysis Scheduler...")
-    print("Scheduling gap analysis for midnight EST daily")
+    print("Scheduling gap analysis for 8:00 AM CT daily")
 
-    # Schedule the job to run at midnight EST
-    schedule.every().day.at("00:00").do(job)
+    # Schedule the job to run at 8:00 AM CT
+    # Note: Using CT timezone handling
+    ct_tz = pytz.timezone('US/Central')
+    schedule.every().day.at("08:00").do(job)
 
     # Also run immediately on startup for testing (remove this in production)
     print("Running initial gap analysis...")

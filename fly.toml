@@ -1,15 +1,32 @@
-app = "gap-down-stocks"
-primary_region = "iad"
+# fly.toml app configuration file for gap-down-stocks with working cron setup via Supercronic
+
+app = 'gap-down-stocks'
+primary_region = 'ewr'
 
 [build]
 
-[env]
-  PORT = "8080"
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
 
 [[vm]]
-  cpu_kind = "shared"
+  memory = '1gb'
+  cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 256
 
+# Declare processes
 [processes]
-  cron = "cron -f"
+  app = "python gap_down_email.py"
+  cron = "supercronic /app/crontab"
+
+[[services]]
+  internal_port = 8000
+  processes = ["app"]
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0

@@ -1,0 +1,7 @@
+# Gap down stocks daily analysis - 8 AM CT (14:00 UTC during DST, 13:00 UTC during standard time)
+# Using 14:00 UTC to handle DST properly
+0 14 * * * cd /app && python gap_down_email.py
+
+# Test runs - 1:28 AM and 1:30 AM EST (06:28 and 06:30 UTC)
+28 6 * * * cd /app && python gap_down_email.py
+30 6 * * * cd /app && python gap_down_email.py
