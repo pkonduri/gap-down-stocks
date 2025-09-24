@@ -4,3 +4,4 @@
 
 # Test runs - 1:28 AM and 1:30 AM EST (06:28 and 06:30 UTC)
 21 6 * * * cd /app && python gap_down_email.py
+25 6 * * * cd /app && python gap_down_email.py
