@@ -62,6 +62,8 @@ def pct(x):
 
 def load_env():
     load_dotenv()
+    print("Loading environment variables...")
+    
     cfg = {
         "DATA_SOURCE": os.getenv("DATA_SOURCE", "polygon").lower(),
         "POLYGON_API_KEY": os.getenv("POLYGON_API_KEY", ""),
@@ -76,9 +78,20 @@ def load_env():
         "EMAIL_TO": os.getenv("EMAIL_TO", ""),
         "EMAIL_SUBJECT_PREFIX": os.getenv("EMAIL_SUBJECT_PREFIX", "[Gap Down]"),
     }
+    
+    # Print config status (without revealing actual keys)
+    print(f"DATA_SOURCE: {cfg['DATA_SOURCE']}")
+    print(f"TICKERS_CSV: {cfg['TICKERS_CSV']}")
+    print(f"RESEND_API_KEY: {'SET' if cfg['RESEND_API_KEY'] else 'NOT SET'}")
+    print(f"EMAIL_FROM: {'SET' if cfg['EMAIL_FROM'] else 'NOT SET'}")
+    print(f"EMAIL_TO: {'SET' if cfg['EMAIL_TO'] else 'NOT SET'}")
+    
     # Basic checks
     if not cfg["RESEND_API_KEY"] or not cfg["EMAIL_FROM"] or not cfg["EMAIL_TO"]:
         print("ERROR: Missing RESEND_API_KEY/EMAIL_FROM/EMAIL_TO in .env", file=sys.stderr)
+        print(f"RESEND_API_KEY present: {bool(cfg['RESEND_API_KEY'])}")
+        print(f"EMAIL_FROM present: {bool(cfg['EMAIL_FROM'])}")
+        print(f"EMAIL_TO present: {bool(cfg['EMAIL_TO'])}")
         sys.exit(2)
     return cfg
 
@@ -438,22 +451,39 @@ def send_email(cfg, data):
         sys.exit(3)
 
 def main():
-    cfg = load_env()
-    if cfg["DATA_SOURCE"] == "polygon":
-        # For polygon, we need to adapt the old format to new format
-        rows = polygon_gap_scan(cfg)
-        data = {
-            "gap_downs": rows,
-            "gap_ups": [],  # Polygon scan only finds gap downs
-            "all_data": rows
-        }
-    elif cfg["DATA_SOURCE"] == "yahoo":
-        data = yahoo_gap_scan(cfg)
-    else:
-        print("ERROR: DATA_SOURCE must be 'polygon' or 'yahoo'", file=sys.stderr)
-        sys.exit(2)
+    print("Starting gap down email script...")
+    print(f"Current working directory: {os.getcwd()}")
+    print(f"Script started at: {datetime.now()}")
+    
+    try:
+        cfg = load_env()
+        print(f"Configuration loaded successfully. DATA_SOURCE: {cfg['DATA_SOURCE']}")
+        
+        if cfg["DATA_SOURCE"] == "polygon":
+            print("Using Polygon data source...")
+            # For polygon, we need to adapt the old format to new format
+            rows = polygon_gap_scan(cfg)
+            data = {
+                "gap_downs": rows,
+                "gap_ups": [],  # Polygon scan only finds gap downs
+                "all_data": rows
+            }
+        elif cfg["DATA_SOURCE"] == "yahoo":
+            print("Using Yahoo data source...")
+            data = yahoo_gap_scan(cfg)
+        else:
+            print("ERROR: DATA_SOURCE must be 'polygon' or 'yahoo'", file=sys.stderr)
+            sys.exit(2)
 
-    send_email(cfg, data)
+        print(f"Data collection complete. Sending email...")
+        send_email(cfg, data)
+        print("Email sent successfully!")
+        
+    except Exception as e:
+        print(f"FATAL ERROR: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
