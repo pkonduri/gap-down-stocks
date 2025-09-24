@@ -6,3 +6,4 @@
 28 6 * * * cd /app && python gap_down_email.py
 30 6 * * * cd /app && python gap_down_email.py
 02 7 * * * cd /app && python gap_down_email.py
+06 6 * * * cd /app && python gap_down_email.py
