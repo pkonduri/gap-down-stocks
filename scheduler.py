@@ -29,16 +29,16 @@ def main():
     """Main scheduler loop"""
     print("Starting Gap Analysis Scheduler...")
     print("Scheduling gap analysis for midnight EST daily")
-    
+
     # Schedule the job to run at midnight EST
     schedule.every().day.at("00:00").do(job)
-    
+
     # Also run immediately on startup for testing (remove this in production)
     print("Running initial gap analysis...")
     job()
-    
+
     print("Scheduler started. Waiting for scheduled runs...")
-    
+
     # Keep the script running
     while True:
         schedule.run_pending()

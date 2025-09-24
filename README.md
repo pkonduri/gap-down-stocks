@@ -16,7 +16,7 @@ A Python application that scans S&P 500 stocks for gap-down and gap-up opportuni
 2. Install dependencies: `pip install -r requirements.txt`
 3. Create a `.env` file with your configuration:
 
-```env
+```envt
 # Data source
 DATA_SOURCE=yahoo
 TICKERS_CSV=sp500_tickers.csv
@@ -63,7 +63,7 @@ The app will automatically run gap analysis at midnight EST daily.
 
 The email includes:
 - Gap Down Stocks table (stocks that gapped down by threshold or more)
-- Gap Up Stocks table (stocks that gapped up by threshold or more)  
+- Gap Up Stocks table (stocks that gapped up by threshold or more)
 - CSV attachment with complete data for all stocks
 
 ## Configuration
