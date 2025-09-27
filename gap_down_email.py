@@ -57,7 +57,9 @@ import pytz
 
 from dotenv import load_dotenv
 
-MINUTE = 60
+# Configuration: Market Open Time (Eastern Time)
+OPEN_HOUR = 9    # Hour in ET (24-hour format)
+OPEN_MINUTE = 15  # Minute
 
 def pct(x):
     return f"{x:.2f}%"
@@ -160,15 +162,15 @@ def polygon_gap_scan(cfg):
 
     today_str = now.date().isoformat()
 
-    # Step 1: Try to get pre-market data at 8 AM ET for today
-    # We'll use 1-minute aggregates to get 8 AM ET price
+    # Step 1: Try to get pre-market data at configured open time for today
+    # We'll use 1-minute aggregates to get the configured open price
     et_tz = pytz.timezone('US/Eastern')
-    target_time_et = datetime.now(et_tz).replace(hour=8, minute=0, second=0, microsecond=0)
+    target_time_et = datetime.now(et_tz).replace(hour=OPEN_HOUR, minute=OPEN_MINUTE, second=0, microsecond=0)
     
-    # Convert 8 AM ET to the format Polygon expects (milliseconds since epoch)
+    # Convert configured open time to the format Polygon expects (milliseconds since epoch)
     target_timestamp = int(target_time_et.timestamp() * 1000)
     
-    print(f"\nFetching pre-market data around 8 AM ET ({target_time_et.strftime('%Y-%m-%d %H:%M %Z')})...")
+    print(f"\nFetching market open data around {OPEN_HOUR:02d}:{OPEN_MINUTE:02d} ET ({target_time_et.strftime('%Y-%m-%d %H:%M %Z')})...")
     
     # First, get list of all tickers from previous day to know what to fetch
     grp_prev_for_tickers = requests.get(
@@ -177,21 +179,21 @@ def polygon_gap_scan(cfg):
     ).json()
     available_tickers = [r["T"] for r in grp_prev_for_tickers.get("results", []) or []]
     
-    print(f"Found {len(available_tickers)} tickers from previous day to check for pre-market data")
+    print(f"Found {len(available_tickers)} tickers from previous day to check for market open data")
     
-    # Try to get pre-market prices using minute aggregates
+    # Try to get market open prices using minute aggregates
     # We'll batch requests for efficiency
     open_today = {}
-    premarket_found = 0
+    market_open_found = 0
     
-    # Sample a subset for testing (first 50 tickers to avoid rate limits)
-    sample_tickers = available_tickers[:50] if len(available_tickers) > 50 else available_tickers
+    # Process all available tickers (remove test limitation)
+    sample_tickers = available_tickers
     
     for i, ticker in enumerate(sample_tickers):
         if i % 10 == 0:
-            print(f"Checking pre-market data: {i}/{len(sample_tickers)} tickers...")
+            print(f"Checking market open data: {i}/{len(sample_tickers)} tickers...")
             
-        # Get minute data for today around 8 AM ET
+        # Get minute data for today around configured open time
         # Polygon format: /v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from}/{to}
         try:
             minute_url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/minute/{today_str}/{today_str}"
@@ -199,16 +201,15 @@ def polygon_gap_scan(cfg):
             minute_data = minute_response.json()
             
             if minute_data.get("results"):
-                # Look for data around 8 AM ET (convert timestamps)
+                # Look for data around configured open time (convert timestamps)
                 for bar in minute_data["results"]:
                     bar_time = datetime.fromtimestamp(bar["t"] / 1000, tz=pytz.UTC).astimezone(et_tz)
-                    # Check if this is around 8 AM ET (+/- 30 minutes)
-                    if (bar_time.hour == 8 and 0 <= bar_time.minute <= 30) or \
-                       (bar_time.hour == 7 and bar_time.minute >= 30):
+                    # Check if this is exactly the configured open time
+                    if (bar_time.hour == OPEN_HOUR and bar_time.minute == OPEN_MINUTE):
                         open_today[ticker] = bar["c"]  # Use close price of the minute bar
-                        premarket_found += 1
+                        market_open_found += 1
                         if i < 3:  # Debug first few
-                            print(f"  {ticker}: Pre-market price at {bar_time.strftime('%H:%M ET')}: ${bar['c']:.2f}")
+                            print(f"  {ticker}: Market open price at {bar_time.strftime('%H:%M ET')}: ${bar['c']:.2f}")
                         break
             
             # Small delay to avoid rate limiting
@@ -216,26 +217,26 @@ def polygon_gap_scan(cfg):
             
         except Exception as e:
             if i < 3:
-                print(f"  {ticker}: Error fetching pre-market data: {e}")
+                print(f"  {ticker}: Error fetching market open data: {e}")
             continue
     
-    print(f"\nPre-market data found for {premarket_found} out of {len(sample_tickers)} tickers")
+    print(f"\nMarket open data found for {market_open_found} out of {len(sample_tickers)} tickers")
     
-    # Fallback: Get regular daily data for tickers without pre-market data
-    if premarket_found < len(sample_tickers) * 0.1:  # If less than 10% have pre-market data
-        print("Low pre-market data availability, falling back to regular market open prices...")
+    # Fallback: Get regular daily data for tickers without market open data
+    if market_open_found < len(sample_tickers) * 0.1:  # If less than 10% have market open data
+        print("Low market open data availability, falling back to regular market open prices...")
         grp_today = requests.get(
             f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{today_str}",
             params={"adjusted": "true", "apiKey": key},
         ).json()
         
         results_today = grp_today.get("results", []) or []
-        # Add regular open prices for tickers we don't have pre-market data
+        # Add regular open prices for tickers we don't have market open data
         for r in results_today:
             if r["T"] not in open_today and r.get("o") is not None:
                 open_today[r["T"]] = r.get("o")
     else:
-        results_today = []  # We're using pre-market data instead
+        results_today = []  # We're using market open data instead
 
     # Step 2: Get previous day's grouped to fetch previous close
     grp_prev = requests.get(
@@ -246,7 +247,7 @@ def polygon_gap_scan(cfg):
     prev_close = {r["T"]: r.get("c") for r in results_prev if r.get("c") is not None}
     
     print(f"\nDATA COLLECTION RESULTS:")
-    print(f"Pre-market/Today's data ({today_str}): {premarket_found} pre-market + {len(open_today) - premarket_found} regular = {len(open_today)} total with prices")
+    print(f"Market open/Today's data ({today_str}): {market_open_found} market open + {len(open_today) - market_open_found} regular = {len(open_today)} total with prices")
     print(f"Previous day data ({prev_trading_day}): {len(results_prev)} tickers total, {len(prev_close)} with close prices")
     
     # Show sample of today's data
@@ -340,7 +341,7 @@ def polygon_gap_scan(cfg):
         else:
             status = f"Filtered: {skip_reason}"
             
-        data_type = "Pre-market" if row.get('data_source') == 'pre-market' else "Regular"
+        data_type = f"{OPEN_HOUR:02d}:{OPEN_MINUTE:02d} ET" if row.get('data_source') == 'market-open' else "Regular"
         print(f"{row['ticker']:<8} ${row['prev_close']:<9.2f} ${row['today_open']:<9.2f} {row['gap_pct']:<7.2f}% ${gap_dollar:<7.2f} {status:<15} {data_type:<12}")
     
     print(f"\nSUMMARY:")
@@ -359,60 +360,79 @@ def polygon_gap_scan(cfg):
         "all_data": rows
     }
 
-def get_premarket_price(ticker, target_hour=8):
+def get_market_open_price(ticker):
     """
-    Attempt to get pre-market price at specified hour (default 8 AM ET).
-    Returns None if no pre-market data available.
-    Only works during actual market hours when pre-market is active.
+    Get the most recent market open price for a ticker at the configured time.
+    Works regardless of when script is run (weekend, after hours, etc.)
     """
     try:
         import yfinance as yf
         import pytz
         
         et_tz = pytz.timezone('US/Eastern')
-        today = datetime.now(et_tz).date()
-        
-        # Only try to get intraday data if it's a weekday and during extended hours
         now_et = datetime.now(et_tz)
-        if now_et.weekday() >= 5:  # Weekend
-            return None
-            
-        # Get 1-minute data for today with pre/post market
-        df_minute = yf.download(ticker, start=today.isoformat(), 
+        
+        # Find the most recent weekday (Monday=0, Sunday=6)
+        days_back = 0
+        current_date = now_et.date()
+        while current_date.weekday() >= 5:  # Weekend
+            days_back += 1
+            current_date = (now_et - timedelta(days=days_back)).date()
+        
+        # If today is a weekday but it's before the configured open time, use yesterday
+        if current_date == now_et.date() and (now_et.hour < OPEN_HOUR or (now_et.hour == OPEN_HOUR and now_et.minute < OPEN_MINUTE)):
+            days_back += 1
+            current_date = (now_et - timedelta(days=days_back)).date()
+            # Skip weekends
+            while current_date.weekday() >= 5:
+                days_back += 1
+                current_date = (now_et - timedelta(days=days_back)).date()
+        
+        # Get several days of 1-minute data to ensure we capture the target date
+        start_date = (current_date - timedelta(days=2)).isoformat()
+        end_date = (current_date + timedelta(days=1)).isoformat()
+        
+        df_minute = yf.download(ticker, start=start_date, end=end_date,
                                interval="1m", auto_adjust=False, 
                                progress=False, prepost=True)
         
         if df_minute is None or len(df_minute) == 0:
             return None
-            
-        # Look for data around target hour ET
-        for idx, timestamp in enumerate(df_minute.index):
+        
+        # Look for exactly the configured open time on the target date
+        target_datetime = et_tz.localize(datetime.combine(current_date, datetime.min.time().replace(hour=OPEN_HOUR, minute=OPEN_MINUTE)))
+        
+        for timestamp, row in df_minute.iterrows():
             if timestamp.tz is None:
                 timestamp = pytz.UTC.localize(timestamp)
             timestamp_et = timestamp.astimezone(et_tz)
             
-            # Check if this is around target hour ET (+/- 30 minutes)
-            if (timestamp_et.hour == target_hour and 0 <= timestamp_et.minute <= 30) or \
-               (timestamp_et.hour == target_hour - 1 and timestamp_et.minute >= 30):
+            # Look for exactly the configured open time on target date
+            if (timestamp_et.date() == current_date and 
+                timestamp_et.hour == OPEN_HOUR and 
+                timestamp_et.minute == OPEN_MINUTE):
+                
                 try:
                     # Handle MultiIndex columns when downloading single ticker
                     if isinstance(df_minute.columns, pd.MultiIndex):
-                        close_price = df_minute[('Close', ticker)].iloc[idx]
+                        close_price = row[('Close', ticker)]
                     else:
-                        close_price = df_minute["Close"].iloc[idx]
+                        close_price = row['Close']
                     
                     if pd.notna(close_price):
                         return {
                             'price': float(close_price),
                             'timestamp': timestamp_et,
-                            'source': 'pre-market'
+                            'source': 'market-open',
+                            'date': current_date
                         }
                 except (KeyError, IndexError):
                     continue
+        
         return None
         
     except Exception as e:
-        print(f"Pre-market fetch error for {ticker}: {e}")
+        print(f"Market open price fetch error for {ticker}: {e}")
         return None
 
 def yahoo_gap_scan(cfg):
@@ -435,13 +455,15 @@ def yahoo_gap_scan(cfg):
             sys.exit(2)
 
         tickers = []
+        seen_tickers = set()
         with open(csv_path, "r", newline="") as f:
             for row in csv.reader(f):
                 if not row:
                     continue
                 t = row[0].strip().upper()
-                if t and t != "TICKER":
+                if t and t != "TICKER" and t not in seen_tickers:
                     tickers.append(t)
+                    seen_tickers.add(t)
 
     print(f"Scanning {len(tickers)} tickers for gap opportunities...")
 
@@ -484,23 +506,20 @@ def yahoo_gap_scan(cfg):
             prev_close_price = float(df["Close"].iloc[-2].iloc[0] if hasattr(df["Close"].iloc[-2], 'iloc') else df["Close"].iloc[-2])
             today_open_price = float(df["Open"].iloc[-1].iloc[0] if hasattr(df["Open"].iloc[-1], 'iloc') else df["Open"].iloc[-1])
             
-            # Try to get pre-market data if we're during trading hours
-            premarket_data = None
+            # Always try to get market open price first
+            market_open_data = None
             try:
-                premarket_data = get_premarket_price(t, target_hour=8)
+                market_open_data = get_market_open_price(t)
             except Exception as e:
                 if i <= 3:
-                    print(f"Pre-market fetch failed for {t}: {e}")
+                    print(f"Market open ({OPEN_HOUR:02d}:{OPEN_MINUTE:02d} ET) fetch failed for {t}: {e}")
             
-            if premarket_data:
-                today_open_price = premarket_data['price']
+            if market_open_data:
+                today_open_price = market_open_data['price']
                 if i <= 3:
-                    print(f"Using pre-market price for {t} at {premarket_data['timestamp'].strftime('%H:%M ET')}: ${today_open_price:.2f}")
+                    print(f"Using {OPEN_HOUR:02d}:{OPEN_MINUTE:02d} ET price for {t} from {market_open_data['date']} at {market_open_data['timestamp'].strftime('%H:%M ET')}: ${today_open_price:.2f}")
             elif i <= 3:
-                print(f"No pre-market data available for {t}, using regular open: ${today_open_price:.2f}")
-            if df is None or len(df) < 2:
-                failed_downloads += 1
-                continue
+                print(f"No {OPEN_HOUR:02d}:{OPEN_MINUTE:02d} ET data available for {t}, using regular open: ${today_open_price:.2f}")
 
             # Assign the prices we found
             prev_close = prev_close_price
@@ -526,7 +545,7 @@ def yahoo_gap_scan(cfg):
             }
 
             # Store all data for CSV with source info
-            stock_data['data_source'] = premarket_data['source'] if premarket_data else 'regular-open'
+            stock_data['data_source'] = market_open_data['source'] if market_open_data else 'regular-open'
             all_data.append(stock_data)
 
             # Categorize based on gap thresholds
@@ -563,29 +582,52 @@ def yahoo_gap_scan(cfg):
             status = "GAP UP ✓"
         else:
             status = "No Gap"
-        data_type = "Pre-market" if row.get('data_source') == 'pre-market' else "Regular"
+        data_type = f"{OPEN_HOUR:02d}:{OPEN_MINUTE:02d} ET" if row.get('data_source') == 'market-open' else "Regular"
         print(f"{row['ticker']:<8} ${row['prev_close']:<9.2f} ${row['today_open']:<9.2f} {row['gap_pct']:<7.2f}% ${gap_dollar:<7.2f} {status:<15} {data_type:<12}")
     
     print(f"{'='*80}\n")
 
+    # Remove duplicates based on ticker (keep first occurrence)
+    seen_tickers = set()
+    unique_all_data = []
+    for stock in all_data:
+        if stock['ticker'] not in seen_tickers:
+            unique_all_data.append(stock)
+            seen_tickers.add(stock['ticker'])
+    
+    # Remove duplicates from gap lists too
+    seen_gap_down = set()
+    unique_gap_downs = []
+    for stock in gap_down_rows:
+        if stock['ticker'] not in seen_gap_down:
+            unique_gap_downs.append(stock)
+            seen_gap_down.add(stock['ticker'])
+    
+    seen_gap_up = set()
+    unique_gap_ups = []
+    for stock in gap_up_rows:
+        if stock['ticker'] not in seen_gap_up:
+            unique_gap_ups.append(stock)
+            seen_gap_up.add(stock['ticker'])
+
     # Sort the data
-    gap_down_rows.sort(key=lambda x: x["gap_pct"])  # most negative first
-    gap_up_rows.sort(key=lambda x: x["gap_pct"], reverse=True)  # most positive first
-    all_data.sort(key=lambda x: x["gap_pct"])  # most negative first
+    unique_gap_downs.sort(key=lambda x: x["gap_pct"])  # most negative first
+    unique_gap_ups.sort(key=lambda x: x["gap_pct"], reverse=True)  # most positive first
+    unique_all_data.sort(key=lambda x: x["gap_pct"])  # most negative first
 
     # Create and display DataFrame for verification
-    display_premarket_dataframe(all_data)
+    display_market_open_dataframe(unique_all_data)
 
     return {
-        "gap_downs": gap_down_rows,
-        "gap_ups": gap_up_rows,
-        "all_data": all_data
+        "gap_downs": unique_gap_downs,
+        "gap_ups": unique_gap_ups,
+        "all_data": unique_all_data
     }
 
-def display_premarket_dataframe(all_data):
-    """Display a pandas DataFrame of all stocks with 8AM ET and previous close prices"""
+def display_market_open_dataframe(all_data):
+    """Display a pandas DataFrame of all stocks with market open and previous close prices"""
     print(f"\n{'='*80}")
-    print("8AM ET PRE-MARKET PRICES VERIFICATION DATAFRAME")
+    print(f"{OPEN_HOUR:02d}:{OPEN_MINUTE:02d} ET MARKET OPEN PRICES VERIFICATION DATAFRAME")
     print(f"{'='*80}")
     
     if not all_data:
@@ -598,7 +640,7 @@ def display_premarket_dataframe(all_data):
         df_data.append({
             'Ticker': stock['ticker'],
             'Prev_Close': f"${stock['prev_close']:.2f}",
-            '8AM_ET_Price': f"${stock['today_open']:.2f}",
+            f'{OPEN_HOUR:02d}:{OPEN_MINUTE:02d}_ET_Price': f"${stock['today_open']:.2f}",
             'Gap_$': f"${(stock['today_open'] - stock['prev_close']):+.2f}",
             'Gap_%': f"{stock['gap_pct']:+.2f}%",
             'Data_Source': stock.get('data_source', 'regular-open')
@@ -607,11 +649,11 @@ def display_premarket_dataframe(all_data):
     # Create pandas DataFrame
     df = pd.DataFrame(df_data)
     
-    # Count pre-market vs regular data
-    premarket_count = len([s for s in all_data if s.get('data_source') == 'pre-market'])
-    regular_count = len(all_data) - premarket_count
+    # Count market open vs regular data
+    market_open_count = len([s for s in all_data if s.get('data_source') == 'market-open'])
+    regular_count = len(all_data) - market_open_count
     
-    print(f"Total stocks: {len(all_data)} | Pre-market data: {premarket_count} | Regular open: {regular_count}")
+    print(f"Total stocks: {len(all_data)} | {OPEN_HOUR:02d}:{OPEN_MINUTE:02d} ET data: {market_open_count} | Regular open: {regular_count}")
     print("\nComplete price data:")
     print(df.to_string(index=False))
     print(f"{'='*80}\n")
@@ -657,12 +699,12 @@ def send_email(cfg, data):
     html_parts = [
         f"<h2>Daily Gap Analysis - {datetime.now().strftime('%Y-%m-%d')}</h2>",
         f"<p><strong>Data Source:</strong> {cfg.get('DATA_SOURCE', 'Unknown').upper()}</p>",
-        f"<p><strong>Timing:</strong> Pre-market data (8:00 AM ET) vs Previous Close</p>",
+        f"<p><strong>Timing:</strong> Market open data ({OPEN_HOUR:02d}:{OPEN_MINUTE:02d} ET) vs Previous Close</p>",
         f"<p><strong>Gap Down Threshold:</strong> ≤ {cfg['MIN_GAP_DOWN_PCT']}%</p>",
         f"<p><strong>Gap Up Threshold:</strong> ≥ {cfg['MIN_GAP_UP_PCT']}%</p>",
         f"<p><strong>Total Stocks Analyzed:</strong> {len(all_data)}</p>",
-        build_html_table(gap_downs, "Gap Down Stocks (Pre-market)", 0),
-        build_html_table(gap_ups, "Gap Up Stocks (Pre-market)", 0),
+        build_html_table(gap_downs, f"Gap Down Stocks ({OPEN_HOUR:02d}:{OPEN_MINUTE:02d} ET)", 0),
+        build_html_table(gap_ups, f"Gap Up Stocks ({OPEN_HOUR:02d}:{OPEN_MINUTE:02d} ET)", 0),
         "<p><em>Complete data with all stocks attached as CSV file for debugging.</em></p>"
     ]
 
