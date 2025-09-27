@@ -2,17 +2,9 @@ TODO:
 
 Carefully execute the following tasks.
 
-1. Remove all of the polygon code. We only are using Yahoo finance for now, and so we don't need all this extraneous Polygon code.
+1. Fix the email so that the email header says [Daily Gaps] [ Formatted Today's Date] [x gap down, x gap up, stocks]. I.e instert the date in the dd/mm/yyyy format into the email header
 
-2. Clean up the script significantly. After all, all we are doing is taking 2 timestamps of data (yesterday's close, and today's morning snapshot (as defined by the open minute and open hour variables))
-
-3. Make these open hour and open minute variables defined in the .env instead, beacuse I would like to configure them on the fly without code cahgnes.
-
-4. The csv in the email is garbled and is not properly rendering data. Make the csv properly display ALL of the stocks and their gap up/down %s (not just the ones listed in the email body)
-
-5. In the email body, list the exact timestamps being pulled (ie. today's premarket timestap: 9 am EST, yesterday's close: 4pm EST, or whatever it is that we use)
-
-4. Make it work across all the S&P stocks (and more). Currently it is only reading 294 stocks for some reason.
+2. For today's timestamp it should tell us what day is "today". Because if its a saturday today, it's actually reading friday's open timetsmpa (9:15 am et or whatever we have configured it as). Similarly, yesterday's close should be the actual yesterday's timetsmpa. For the email i ran today september 27th, the  email says "Yesterday's close: Market close (~4:00 PM ET on 2025-09-26)". This is incorrect, because "yesterday" actually referring to thursday (and today referring to friday open)
 
 Future tasks (do not worry about this now)
 
