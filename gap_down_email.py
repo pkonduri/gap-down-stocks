@@ -52,6 +52,8 @@ import time
 import json
 import csv
 from datetime import datetime, date, timedelta, timezone
+import pandas as pd
+import pytz
 
 from dotenv import load_dotenv
 
@@ -158,20 +160,82 @@ def polygon_gap_scan(cfg):
 
     today_str = now.date().isoformat()
 
-    # Step 1: Get today's daily open for all tickers that have data today
-    # Polygon aggregates: /v2/aggs/grouped/locale/us/market/stocks/{date}
-    # This gives open/close/high/low/volume for each ticker for *today* (after close).
-    # But at open time, we can get 1-minute aggregates at 9:30 and compute open ourselves.
-    # Simpler approach: use "open" from daily once available (post-open it may still be present).
-    # We'll use grouped aggregates for PRELIM today; at 9:35 it should be populated.
-    grp_today = requests.get(
-        f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{today_str}",
+    # Step 1: Try to get pre-market data at 8 AM ET for today
+    # We'll use 1-minute aggregates to get 8 AM ET price
+    et_tz = pytz.timezone('US/Eastern')
+    target_time_et = datetime.now(et_tz).replace(hour=8, minute=0, second=0, microsecond=0)
+    
+    # Convert 8 AM ET to the format Polygon expects (milliseconds since epoch)
+    target_timestamp = int(target_time_et.timestamp() * 1000)
+    
+    print(f"\nFetching pre-market data around 8 AM ET ({target_time_et.strftime('%Y-%m-%d %H:%M %Z')})...")
+    
+    # First, get list of all tickers from previous day to know what to fetch
+    grp_prev_for_tickers = requests.get(
+        f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{prev_trading_day}",
         params={"adjusted": "true", "apiKey": key},
     ).json()
-
-    results_today = grp_today.get("results", []) or []
-    # Build map: ticker -> today's open
-    open_today = {r["T"]: r.get("o") for r in results_today if r.get("o") is not None}
+    available_tickers = [r["T"] for r in grp_prev_for_tickers.get("results", []) or []]
+    
+    print(f"Found {len(available_tickers)} tickers from previous day to check for pre-market data")
+    
+    # Try to get pre-market prices using minute aggregates
+    # We'll batch requests for efficiency
+    open_today = {}
+    premarket_found = 0
+    
+    # Sample a subset for testing (first 50 tickers to avoid rate limits)
+    sample_tickers = available_tickers[:50] if len(available_tickers) > 50 else available_tickers
+    
+    for i, ticker in enumerate(sample_tickers):
+        if i % 10 == 0:
+            print(f"Checking pre-market data: {i}/{len(sample_tickers)} tickers...")
+            
+        # Get minute data for today around 8 AM ET
+        # Polygon format: /v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from}/{to}
+        try:
+            minute_url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/minute/{today_str}/{today_str}"
+            minute_response = requests.get(minute_url, params={"adjusted": "true", "apiKey": key})
+            minute_data = minute_response.json()
+            
+            if minute_data.get("results"):
+                # Look for data around 8 AM ET (convert timestamps)
+                for bar in minute_data["results"]:
+                    bar_time = datetime.fromtimestamp(bar["t"] / 1000, tz=pytz.UTC).astimezone(et_tz)
+                    # Check if this is around 8 AM ET (+/- 30 minutes)
+                    if (bar_time.hour == 8 and 0 <= bar_time.minute <= 30) or \
+                       (bar_time.hour == 7 and bar_time.minute >= 30):
+                        open_today[ticker] = bar["c"]  # Use close price of the minute bar
+                        premarket_found += 1
+                        if i < 3:  # Debug first few
+                            print(f"  {ticker}: Pre-market price at {bar_time.strftime('%H:%M ET')}: ${bar['c']:.2f}")
+                        break
+            
+            # Small delay to avoid rate limiting
+            time.sleep(0.1)
+            
+        except Exception as e:
+            if i < 3:
+                print(f"  {ticker}: Error fetching pre-market data: {e}")
+            continue
+    
+    print(f"\nPre-market data found for {premarket_found} out of {len(sample_tickers)} tickers")
+    
+    # Fallback: Get regular daily data for tickers without pre-market data
+    if premarket_found < len(sample_tickers) * 0.1:  # If less than 10% have pre-market data
+        print("Low pre-market data availability, falling back to regular market open prices...")
+        grp_today = requests.get(
+            f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{today_str}",
+            params={"adjusted": "true", "apiKey": key},
+        ).json()
+        
+        results_today = grp_today.get("results", []) or []
+        # Add regular open prices for tickers we don't have pre-market data
+        for r in results_today:
+            if r["T"] not in open_today and r.get("o") is not None:
+                open_today[r["T"]] = r.get("o")
+    else:
+        results_today = []  # We're using pre-market data instead
 
     # Step 2: Get previous day's grouped to fetch previous close
     grp_prev = requests.get(
@@ -180,6 +244,23 @@ def polygon_gap_scan(cfg):
     ).json()
     results_prev = grp_prev.get("results", []) or []
     prev_close = {r["T"]: r.get("c") for r in results_prev if r.get("c") is not None}
+    
+    print(f"\nDATA COLLECTION RESULTS:")
+    print(f"Pre-market/Today's data ({today_str}): {premarket_found} pre-market + {len(open_today) - premarket_found} regular = {len(open_today)} total with prices")
+    print(f"Previous day data ({prev_trading_day}): {len(results_prev)} tickers total, {len(prev_close)} with close prices")
+    
+    # Show sample of today's data
+    if results_today:
+        print(f"\nSample of today's data:")
+        for i, r in enumerate(results_today[:3]):
+            print(f"  {r['T']}: Open={r.get('o')}, Close={r.get('c')}, High={r.get('h')}, Low={r.get('l')}, Volume={r.get('v')}")
+    
+    # Show sample of previous day data
+    if results_prev:
+        print(f"\nSample of previous day data:")
+        for i, r in enumerate(results_prev[:3]):
+            print(f"  {r['T']}: Open={r.get('o')}, Close={r.get('c')}, High={r.get('h')}, Low={r.get('l')}, Volume={r.get('v')}")
+    print()
 
     # Optional metadata for filtering (market cap, optionable)
     meta = {}
@@ -207,33 +288,132 @@ def polygon_gap_scan(cfg):
         if not c_prev or not o:
             continue
         gap_pct = (o - c_prev) / c_prev * 100.0
-        if gap_pct <= cfg["MIN_GAP_PCT"]:
-            # Filter by market cap / optionable if present
-            if t in meta:
-                mc = meta[t]["market_cap"]
-                op = meta[t]["optionable"]
-                if mc < cfg["MIN_MARKET_CAP"]:
-                    continue
-                if cfg["ONLY_OPTIONABLE"] and not op:
-                    continue
-                name = meta[t]["name"]
+        # Store all data for debugging regardless of thresholds
+        stock_data = {
+            "ticker": t,
+            "name": meta.get(t, {}).get("name", ""),
+            "prev_close": c_prev,
+            "today_open": o,
+            "gap_pct": gap_pct,
+            "market_cap": meta.get(t, {}).get("market_cap"),
+            "optionable": meta.get(t, {}).get("optionable"),
+        }
+        
+        rows.append(stock_data)
+
+    # Print debugging table for all stocks
+    print(f"\n{'='*80}")
+    print(f"POLYGON DATA DEBUGGING - All Stocks with Data")
+    print(f"Previous Trading Day: {prev_trading_day}")
+    print(f"Today: {today_str}")
+    print(f"UTC Now: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"Total stocks with today's open data: {len(open_today)}")
+    print(f"Total stocks with previous close data: {len(prev_close)}")
+    print(f"Stocks with both open and close data: {len(rows)}")
+    print(f"{'='*80}")
+    print(f"{'Ticker':<8} {'Prev Close':<10} {'Pre/Open':<10} {'Gap %':<8} {'Gap $':<8} {'Status':<15} {'Data Type':<12}")
+    print("-" * 92)
+    
+    gap_downs = []
+    gap_ups = []
+    
+    for row in rows:
+        gap_dollar = row['today_open'] - row['prev_close']
+        
+        # Apply filters for final results
+        skip_reason = None
+        if row['ticker'] in meta:
+            if meta[row['ticker']]['market_cap'] < cfg['MIN_MARKET_CAP']:
+                skip_reason = "Low Market Cap"
+            elif cfg['ONLY_OPTIONABLE'] and not meta[row['ticker']]['optionable']:
+                skip_reason = "Not Optionable"
+        
+        if not skip_reason:
+            if row['gap_pct'] <= cfg['MIN_GAP_DOWN_PCT']:
+                gap_downs.append(row)
+                status = "GAP DOWN ✓"
+            elif row['gap_pct'] >= cfg['MIN_GAP_UP_PCT']:
+                gap_ups.append(row)
+                status = "GAP UP ✓"
             else:
-                mc = None
-                op = None
-                name = ""
-
-            rows.append({
-                "ticker": t,
-                "name": name,
-                "prev_close": c_prev,
-                "today_open": o,
-                "gap_pct": gap_pct,
-                "market_cap": mc,
-                "optionable": op,
-            })
-
+                status = "No Gap"
+        else:
+            status = f"Filtered: {skip_reason}"
+            
+        data_type = "Pre-market" if row.get('data_source') == 'pre-market' else "Regular"
+        print(f"{row['ticker']:<8} ${row['prev_close']:<9.2f} ${row['today_open']:<9.2f} {row['gap_pct']:<7.2f}% ${gap_dollar:<7.2f} {status:<15} {data_type:<12}")
+    
+    print(f"\nSUMMARY:")
+    print(f"Total stocks with data: {len(rows)}")
+    print(f"Gap-down stocks (≤{cfg['MIN_GAP_DOWN_PCT']}%): {len(gap_downs)}")
+    print(f"Gap-up stocks (≥{cfg['MIN_GAP_UP_PCT']}%): {len(gap_ups)}")
+    print(f"{'='*80}\n")
+    
     rows.sort(key=lambda x: x["gap_pct"])  # most negative first
-    return rows
+    gap_downs.sort(key=lambda x: x["gap_pct"])  # most negative first
+    gap_ups.sort(key=lambda x: x["gap_pct"], reverse=True)  # most positive first
+    
+    return {
+        "gap_downs": gap_downs,
+        "gap_ups": gap_ups,
+        "all_data": rows
+    }
+
+def get_premarket_price(ticker, target_hour=8):
+    """
+    Attempt to get pre-market price at specified hour (default 8 AM ET).
+    Returns None if no pre-market data available.
+    Only works during actual market hours when pre-market is active.
+    """
+    try:
+        import yfinance as yf
+        import pytz
+        
+        et_tz = pytz.timezone('US/Eastern')
+        today = datetime.now(et_tz).date()
+        
+        # Only try to get intraday data if it's a weekday and during extended hours
+        now_et = datetime.now(et_tz)
+        if now_et.weekday() >= 5:  # Weekend
+            return None
+            
+        # Get 1-minute data for today with pre/post market
+        df_minute = yf.download(ticker, start=today.isoformat(), 
+                               interval="1m", auto_adjust=False, 
+                               progress=False, prepost=True)
+        
+        if df_minute is None or len(df_minute) == 0:
+            return None
+            
+        # Look for data around target hour ET
+        for idx, timestamp in enumerate(df_minute.index):
+            if timestamp.tz is None:
+                timestamp = pytz.UTC.localize(timestamp)
+            timestamp_et = timestamp.astimezone(et_tz)
+            
+            # Check if this is around target hour ET (+/- 30 minutes)
+            if (timestamp_et.hour == target_hour and 0 <= timestamp_et.minute <= 30) or \
+               (timestamp_et.hour == target_hour - 1 and timestamp_et.minute >= 30):
+                try:
+                    # Handle MultiIndex columns when downloading single ticker
+                    if isinstance(df_minute.columns, pd.MultiIndex):
+                        close_price = df_minute[('Close', ticker)].iloc[idx]
+                    else:
+                        close_price = df_minute["Close"].iloc[idx]
+                    
+                    if pd.notna(close_price):
+                        return {
+                            'price': float(close_price),
+                            'timestamp': timestamp_et,
+                            'source': 'pre-market'
+                        }
+                except (KeyError, IndexError):
+                    continue
+        return None
+        
+    except Exception as e:
+        print(f"Pre-market fetch error for {ticker}: {e}")
+        return None
 
 def yahoo_gap_scan(cfg):
     # Use yfinance with tickers from CSV or Financial Modeling Prep API
@@ -281,20 +461,58 @@ def yahoo_gap_scan(cfg):
             # Add a small delay to avoid rate limiting
             time.sleep(0.2)
 
+            # For now, let's use regular daily data but we can enhance this later
+            # when the market is actually open and pre-market data is available
             df = yf.download(t, period="5d", interval="1d", auto_adjust=False, progress=False)
             if df is None or len(df) < 2:
                 failed_downloads += 1
                 continue
 
-            prev_close = float(df["Close"].iloc[-2].iloc[0])
-            today_open = float(df["Open"].iloc[-1].iloc[0])
+            # Add timestamp debugging for first few stocks
+            if i <= 3:
+                print(f"\n--- TIMESTAMP DEBUG for {t} ---")
+                print(f"DataFrame shape: {df.shape}")
+                print(f"DataFrame index (dates):")
+                for idx, date in enumerate(df.index):
+                    close_val = df['Close'].iloc[idx].iloc[0] if hasattr(df['Close'].iloc[idx], 'iloc') else df['Close'].iloc[idx]
+                    open_val = df['Open'].iloc[idx].iloc[0] if hasattr(df['Open'].iloc[idx], 'iloc') else df['Open'].iloc[idx]
+                    print(f"  {idx}: {date.strftime('%Y-%m-%d %A')} - Close: {close_val:.2f}, Open: {open_val:.2f}")
+                print(f"Using prev_close from: {df.index[-2].strftime('%Y-%m-%d %A')}")
+                print(f"Using today_open from: {df.index[-1].strftime('%Y-%m-%d %A')}")
+                print("--- END DEBUG ---\n")
+
+            prev_close_price = float(df["Close"].iloc[-2].iloc[0] if hasattr(df["Close"].iloc[-2], 'iloc') else df["Close"].iloc[-2])
+            today_open_price = float(df["Open"].iloc[-1].iloc[0] if hasattr(df["Open"].iloc[-1], 'iloc') else df["Open"].iloc[-1])
+            
+            # Try to get pre-market data if we're during trading hours
+            premarket_data = None
+            try:
+                premarket_data = get_premarket_price(t, target_hour=8)
+            except Exception as e:
+                if i <= 3:
+                    print(f"Pre-market fetch failed for {t}: {e}")
+            
+            if premarket_data:
+                today_open_price = premarket_data['price']
+                if i <= 3:
+                    print(f"Using pre-market price for {t} at {premarket_data['timestamp'].strftime('%H:%M ET')}: ${today_open_price:.2f}")
+            elif i <= 3:
+                print(f"No pre-market data available for {t}, using regular open: ${today_open_price:.2f}")
+            if df is None or len(df) < 2:
+                failed_downloads += 1
+                continue
+
+            # Assign the prices we found
+            prev_close = prev_close_price
+            today_open = today_open_price
             gap_pct = (today_open - prev_close) / prev_close * 100.0
 
             successful_downloads += 1
 
-            # Print gap information for debugging
-            gap_direction = "GAP DOWN" if gap_pct < 0 else "GAP UP" if gap_pct > 0 else "NO GAP"
-            print(f"{t}: {prev_close:.2f} → {today_open:.2f} ({gap_pct:+.2f}%) - {gap_direction}")
+            # Print concise gap information during processing
+            if i % 50 == 0 or gap_pct <= cfg['MIN_GAP_DOWN_PCT'] or gap_pct >= cfg['MIN_GAP_UP_PCT']:
+                gap_direction = "GAP DOWN" if gap_pct <= cfg['MIN_GAP_DOWN_PCT'] else "GAP UP" if gap_pct >= cfg['MIN_GAP_UP_PCT'] else "No Gap"
+                print(f"{t}: ${prev_close:.2f} → ${today_open:.2f} ({gap_pct:+.2f}%) - {gap_direction}")
 
             # Create stock data entry
             stock_data = {
@@ -307,7 +525,8 @@ def yahoo_gap_scan(cfg):
                 "optionable": None,
             }
 
-            # Store all data for CSV
+            # Store all data for CSV with source info
+            stock_data['data_source'] = premarket_data['source'] if premarket_data else 'regular-open'
             all_data.append(stock_data)
 
             # Categorize based on gap thresholds
@@ -324,22 +543,78 @@ def yahoo_gap_scan(cfg):
             elif failed_downloads == 6:
                 print("... (suppressing further error messages)")
 
-    print(f"\nScan complete:")
-    print(f"- Successfully processed: {successful_downloads} tickers")
-    print(f"- Failed downloads: {failed_downloads} tickers")
-    print(f"- Gap-down stocks found: {len(gap_down_rows)}")
-    print(f"- Gap-up stocks found: {len(gap_up_rows)}")
+    print(f"\n{'='*80}")
+    print(f"YAHOO FINANCE DATA DEBUGGING - All Stocks Summary")
+    print(f"{'='*80}")
+    print(f"Successfully processed: {successful_downloads} tickers")
+    print(f"Failed downloads: {failed_downloads} tickers")
+    print(f"Gap-down stocks found (≤{cfg['MIN_GAP_DOWN_PCT']}%): {len(gap_down_rows)}")
+    print(f"Gap-up stocks found (≥{cfg['MIN_GAP_UP_PCT']}%): {len(gap_up_rows)}")
+    print(f"\nDetailed breakdown of all processed stocks:")
+    print(f"{'Ticker':<8} {'Prev Close':<10} {'Pre/Open':<10} {'Gap %':<8} {'Gap $':<8} {'Status':<15} {'Data Type':<12}")
+    print("-" * 92)
+    
+    # Print all data in sorted order
+    for row in sorted(all_data, key=lambda x: x['gap_pct']):
+        gap_dollar = row['today_open'] - row['prev_close']
+        if row['gap_pct'] <= cfg['MIN_GAP_DOWN_PCT']:
+            status = "GAP DOWN ✓"
+        elif row['gap_pct'] >= cfg['MIN_GAP_UP_PCT']:
+            status = "GAP UP ✓"
+        else:
+            status = "No Gap"
+        data_type = "Pre-market" if row.get('data_source') == 'pre-market' else "Regular"
+        print(f"{row['ticker']:<8} ${row['prev_close']:<9.2f} ${row['today_open']:<9.2f} {row['gap_pct']:<7.2f}% ${gap_dollar:<7.2f} {status:<15} {data_type:<12}")
+    
+    print(f"{'='*80}\n")
 
     # Sort the data
     gap_down_rows.sort(key=lambda x: x["gap_pct"])  # most negative first
     gap_up_rows.sort(key=lambda x: x["gap_pct"], reverse=True)  # most positive first
     all_data.sort(key=lambda x: x["gap_pct"])  # most negative first
 
+    # Create and display DataFrame for verification
+    display_premarket_dataframe(all_data)
+
     return {
         "gap_downs": gap_down_rows,
         "gap_ups": gap_up_rows,
         "all_data": all_data
     }
+
+def display_premarket_dataframe(all_data):
+    """Display a pandas DataFrame of all stocks with 8AM ET and previous close prices"""
+    print(f"\n{'='*80}")
+    print("8AM ET PRE-MARKET PRICES VERIFICATION DATAFRAME")
+    print(f"{'='*80}")
+    
+    if not all_data:
+        print("No data available to display")
+        return
+    
+    # Create DataFrame
+    df_data = []
+    for stock in all_data:
+        df_data.append({
+            'Ticker': stock['ticker'],
+            'Prev_Close': f"${stock['prev_close']:.2f}",
+            '8AM_ET_Price': f"${stock['today_open']:.2f}",
+            'Gap_$': f"${(stock['today_open'] - stock['prev_close']):+.2f}",
+            'Gap_%': f"{stock['gap_pct']:+.2f}%",
+            'Data_Source': stock.get('data_source', 'regular-open')
+        })
+    
+    # Create pandas DataFrame
+    df = pd.DataFrame(df_data)
+    
+    # Count pre-market vs regular data
+    premarket_count = len([s for s in all_data if s.get('data_source') == 'pre-market'])
+    regular_count = len(all_data) - premarket_count
+    
+    print(f"Total stocks: {len(all_data)} | Pre-market data: {premarket_count} | Regular open: {regular_count}")
+    print("\nComplete price data:")
+    print(df.to_string(index=False))
+    print(f"{'='*80}\n")
 
 def send_email(cfg, data):
     # Use Resend to send HTML tables and CSV attachment
@@ -378,14 +653,17 @@ def send_email(cfg, data):
         )
         return f"<h3>{title} ({len(rows)} stocks)</h3>" + html_table
 
-    # Build HTML content
+    # Build HTML content with debugging info
     html_parts = [
         f"<h2>Daily Gap Analysis - {datetime.now().strftime('%Y-%m-%d')}</h2>",
+        f"<p><strong>Data Source:</strong> {cfg.get('DATA_SOURCE', 'Unknown').upper()}</p>",
+        f"<p><strong>Timing:</strong> Pre-market data (8:00 AM ET) vs Previous Close</p>",
         f"<p><strong>Gap Down Threshold:</strong> ≤ {cfg['MIN_GAP_DOWN_PCT']}%</p>",
         f"<p><strong>Gap Up Threshold:</strong> ≥ {cfg['MIN_GAP_UP_PCT']}%</p>",
-        build_html_table(gap_downs, "Gap Down Stocks", 0),
-        build_html_table(gap_ups, "Gap Up Stocks", 0),
-        "<p><em>Complete data attached as CSV file.</em></p>"
+        f"<p><strong>Total Stocks Analyzed:</strong> {len(all_data)}</p>",
+        build_html_table(gap_downs, "Gap Down Stocks (Pre-market)", 0),
+        build_html_table(gap_ups, "Gap Up Stocks (Pre-market)", 0),
+        "<p><em>Complete data with all stocks attached as CSV file for debugging.</em></p>"
     ]
 
     html = "".join(html_parts)
@@ -461,13 +739,7 @@ def main():
         
         if cfg["DATA_SOURCE"] == "polygon":
             print("Using Polygon data source...")
-            # For polygon, we need to adapt the old format to new format
-            rows = polygon_gap_scan(cfg)
-            data = {
-                "gap_downs": rows,
-                "gap_ups": [],  # Polygon scan only finds gap downs
-                "all_data": rows
-            }
+            data = polygon_gap_scan(cfg)
         elif cfg["DATA_SOURCE"] == "yahoo":
             print("Using Yahoo data source...")
             data = yahoo_gap_scan(cfg)
