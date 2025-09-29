@@ -60,6 +60,7 @@ def load_env():
         "OPEN_MINUTE": int(os.getenv("OPEN_MINUTE", "15")),
         "MIN_GAP_DOWN_PCT": float(os.getenv("MIN_GAP_DOWN_PCT", "-5")),
         "MIN_GAP_UP_PCT": float(os.getenv("MIN_GAP_UP_PCT", "1")),
+        "TESTING_MODE": os.getenv("TESTING_MODE", "false").lower() == "true",
         "RESEND_API_KEY": os.getenv("RESEND_API_KEY", ""),
         "EMAIL_FROM": os.getenv("EMAIL_FROM", ""),
         "EMAIL_TO": os.getenv("EMAIL_TO", ""),
@@ -69,6 +70,7 @@ def load_env():
     # Print config status (without revealing actual keys)
     print(f"TICKERS_CSV: {cfg['TICKERS_CSV']}")
     print(f"OPEN_TIME: {cfg['OPEN_HOUR']:02d}:{cfg['OPEN_MINUTE']:02d} ET")
+    print(f"TESTING_MODE: {cfg['TESTING_MODE']}")
     print(f"RESEND_API_KEY: {'SET' if cfg['RESEND_API_KEY'] else 'NOT SET'}")
     print(f"EMAIL_FROM: {'SET' if cfg['EMAIL_FROM'] else 'NOT SET'}")
     print(f"EMAIL_TO: {'SET' if cfg['EMAIL_TO'] else 'NOT SET'}")
@@ -181,12 +183,14 @@ def yahoo_gap_scan(cfg):
                 tickers.append(t)
                 seen_tickers.add(t)
 
-    # TEMPORARY: Limit to first 100 tickers for testing
-    original_count = len(tickers)
-    tickers = tickers[:50]
-    print(f"TESTING MODE: Using first {len(tickers)} tickers out of {original_count} total")
+    # Apply testing mode if enabled
+    if cfg.get('TESTING_MODE', False):
+        original_count = len(tickers)
+        tickers = tickers[:50]
+        print(f"TESTING MODE: Using first {len(tickers)} tickers out of {original_count} total")
 
-    print(f"Scanning {len(tickers)} tickers for gap opportunities... (TESTING MODE - LIMITED SET)")
+    mode_text = " (TESTING MODE - LIMITED SET)" if cfg.get('TESTING_MODE', False) else ""
+    print(f"Scanning {len(tickers)} tickers for gap opportunities...{mode_text}")
 
     all_data = []  # Store all stock data for CSV
     gap_down_rows = []  # Store gap-down stocks
