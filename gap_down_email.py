@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Daily Gap-Down Emailer
-----------------------
-Finds stocks that gapped down by X% or more at the regular session open and emails you a list.
+Daily Gap Analysis Emailer
+-------------------------
+Finds stocks with significant price gaps by comparing current prices vs previous market close.
 
 Data source:
 - Yahoo Finance via yfinance
@@ -10,8 +10,15 @@ Data source:
 Email:
 - Resend API for sending emails
 
-Suggested schedule:
-- Run at configurable time (default 9:15 AM US/Eastern) to capture pre-market/open price data.
+Timing Logic:
+- Current Timestamp: Uses the exact time when the script is run to get current pricing
+- Previous Close: Uses the most recent market close (4pm ET) from the last trading day
+
+Examples:
+- Script run Sunday 9pm ET: Current = Sunday 9pm overnight price, Previous = Friday 4pm close
+- Script run Monday 9am ET: Current = Monday 9am pre-market, Previous = Friday 4pm close  
+- Script run Tuesday 2pm ET: Current = Tuesday 2pm intraday, Previous = Monday 4pm close
+- Script run Wednesday 8pm ET: Current = Wednesday 8pm after-hours, Previous = Tuesday 4pm close
 
 Usage:
   1) Create .env file with required variables
@@ -20,8 +27,7 @@ Usage:
 
 Environment (.env):
   TICKERS_CSV=sp500_tickers.csv
-  OPEN_HOUR=9           # Hour in ET (24-hour format)
-  OPEN_MINUTE=15        # Minute
+  TESTING_MODE=false    # true to limit to first 50 tickers for testing
   MIN_GAP_DOWN_PCT=-5   # negative number, e.g., -5 means -5% or worse
   MIN_GAP_UP_PCT=1      # positive number, e.g., 1 means +1% or better
   RESEND_API_KEY=re_xxxxxx
@@ -30,9 +36,11 @@ Environment (.env):
   EMAIL_SUBJECT_PREFIX=[Gap Down]
 
 Notes:
-- Compares previous day's close with configured morning timestamp
-- Email includes Gap Down stocks, Gap Up stocks, and CSV attachment with all data
-- Large ticker lists are processed with progress tracking and rate limiting
+- Gap calculation: (Current Price - Previous Close) / Previous Close * 100
+- Automatically handles weekends, holidays, and extended trading sessions
+- Current price source: minute-level data when available, daily close as fallback
+- Email includes Gap Down stocks, Gap Up stocks, and Excel attachment with highlighting
+- Excel file highlights gap-down stocks in red, gap-up stocks in green
 """
 import os
 import sys
@@ -93,35 +101,35 @@ def get_current_price(ticker):
     try:
         import yfinance as yf
         import pytz
-        
+
         et_tz = pytz.timezone('US/Eastern')
         now_et = datetime.now(et_tz)
-        
+
         # Get recent data to find the most current price available
         # Use 1-minute data for current day, and daily data as fallback
-        
+
         # Try to get recent minute data first (for intraday/overnight pricing)
         try:
             # Get last 5 days of minute data to capture weekend/overnight sessions
-            df_minute = yf.download(ticker, period="5d", interval="1m", 
+            df_minute = yf.download(ticker, period="5d", interval="1m",
                                    auto_adjust=False, progress=False, prepost=True)
-            
+
             if df_minute is not None and len(df_minute) > 0:
                 # Get the most recent price from minute data
                 latest_idx = df_minute.index[-1]
                 latest_row = df_minute.iloc[-1]
-                
+
                 # Convert timestamp to ET
                 if latest_idx.tz is None:
                     latest_idx = pytz.UTC.localize(latest_idx)
                 latest_timestamp_et = latest_idx.astimezone(et_tz)
-                
+
                 # Get the close price from the most recent minute
                 if isinstance(df_minute.columns, pd.MultiIndex):
                     current_price = latest_row[('Close', ticker)]
                 else:
                     current_price = latest_row['Close']
-                
+
                 if pd.notna(current_price):
                     return {
                         'price': float(current_price),
@@ -129,29 +137,29 @@ def get_current_price(ticker):
                         'source': 'current-minute',
                         'date': latest_timestamp_et.date()
                     }
-        
+
         except Exception:
             # Fallback to daily data if minute data fails
             pass
-        
+
         # Fallback: Get daily data for most recent close
-        df_daily = yf.download(ticker, period="5d", interval="1d", 
+        df_daily = yf.download(ticker, period="5d", interval="1d",
                               auto_adjust=False, progress=False)
-        
+
         if df_daily is not None and len(df_daily) > 0:
             # Get the most recent trading day's close
             latest_close = float(df_daily["Close"].iloc[-1].iloc[0] if hasattr(df_daily["Close"].iloc[-1], 'iloc') else df_daily["Close"].iloc[-1])
             latest_date = df_daily.index[-1].date()
-            
+
             return {
                 'price': latest_close,
                 'timestamp': now_et,  # Current time when we fetched it
                 'source': 'daily-close',
                 'date': latest_date
             }
-        
+
         return None
-        
+
     except Exception as e:
         print(f"Current price fetch error for {ticker}: {e}")
         return None
@@ -345,20 +353,20 @@ def send_email(cfg, data):
     # Build HTML content with current timestamp info
     et_tz = pytz.timezone('US/Eastern')
     now_et = datetime.now(et_tz)
-    
+
     # Find the most recent market close day
     # This should be the most recent day when markets actually closed at 4pm ET
     # For Sunday: Friday close (no Saturday trading)
     # For Monday before 4pm: Friday close (Monday hasn't closed yet)
     # For Monday after 4pm: Monday close (Monday has closed)
-    
+
     # Start from today and work backwards to find the most recent trading day that has closed
     previous_trading_day = now_et.date()
-    
+
     # If today is a weekend, go back to the most recent trading day
     while previous_trading_day.weekday() >= 5:  # Saturday=5, Sunday=6
         previous_trading_day = previous_trading_day - timedelta(days=1)
-    
+
     # If today is a weekday, we need to decide:
     # - If markets haven't closed today yet (before 4pm), use previous day's close
     # - If markets have closed today (after 4pm), use today's close
@@ -368,7 +376,7 @@ def send_email(cfg, data):
         previous_trading_day = previous_trading_day - timedelta(days=1)
         while previous_trading_day.weekday() >= 5:  # Skip weekends
             previous_trading_day = previous_trading_day - timedelta(days=1)
-    
+
     # Format the timestamps for display
     current_time_str = now_et.strftime('%A, %Y-%m-%d at %I:%M %p ET')
     previous_day_name = previous_trading_day.strftime('%A')
