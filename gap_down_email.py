@@ -23,7 +23,11 @@ Examples:
 Usage:
   1) Create .env file with required variables
   2) pip install -r requirements.txt
-  3) python gap_down_email.py
+  3) python gap_down_email.py [command]
+  
+Commands:
+  email       - Send to personal recipients (default, uses PERSONAL_EMAILS)
+  email-all   - Send to all recipients (uses RECEIVER_EMAIL_ADDRESS)
 
 Environment (.env):
   TICKERS_CSV=sp500_tickers.csv
@@ -32,7 +36,8 @@ Environment (.env):
   MIN_GAP_UP_PCT=1      # positive number, e.g., 1 means +1% or better
   RESEND_API_KEY=re_xxxxxx
   EMAIL_FROM=you@example.com
-  EMAIL_TO=you@example.com
+  PERSONAL_EMAILS=you@example.com  # personal/default recipient for 'email' command
+  RECEIVER_EMAIL_ADDRESS=email1@example.com,email2@example.com  # all recipients for 'email-all' command
   EMAIL_SUBJECT_PREFIX=[Gap Down]
 
 Notes:
@@ -55,6 +60,20 @@ import pytz
 
 from dotenv import load_dotenv
 
+def get_personal_emails(cfg):
+    """Get personal/default email recipients from PERSONAL_EMAILS environment variable"""
+    personal_emails = cfg.get("PERSONAL_EMAILS", "")
+    if not personal_emails:
+        return []
+    return [email.strip() for email in personal_emails.split(",") if email.strip()]
+
+def get_all_recipients(cfg):
+    """Get all email recipients from RECEIVER_EMAIL_ADDRESS environment variable"""
+    receiver_emails = cfg.get("RECEIVER_EMAIL_ADDRESS", "")
+    if not receiver_emails:
+        return []
+    return [email.strip() for email in receiver_emails.split(",") if email.strip()]
+
 def pct(x):
     return f"{x:.2f}%"
 
@@ -69,7 +88,8 @@ def load_env():
         "TESTING_MODE": os.getenv("TESTING_MODE", "false").lower() == "true",
         "RESEND_API_KEY": os.getenv("RESEND_API_KEY", ""),
         "EMAIL_FROM": os.getenv("EMAIL_FROM", ""),
-        "EMAIL_TO": os.getenv("EMAIL_TO", ""),
+        "PERSONAL_EMAILS": os.getenv("PERSONAL_EMAILS", ""),
+        "RECEIVER_EMAIL_ADDRESS": os.getenv("RECEIVER_EMAIL_ADDRESS", ""),
         "EMAIL_SUBJECT_PREFIX": os.getenv("EMAIL_SUBJECT_PREFIX", "[Gap Down]"),
     }
 
@@ -80,15 +100,15 @@ def load_env():
     print(f"GAP_UP_THRESHOLD: {cfg['MIN_GAP_UP_PCT']}%")
     print(f"RESEND_API_KEY: {'SET' if cfg['RESEND_API_KEY'] else 'NOT SET'}")
     print(f"EMAIL_FROM: {'SET' if cfg['EMAIL_FROM'] else 'NOT SET'}")
-    print(f"EMAIL_TO: {'SET' if cfg['EMAIL_TO'] else 'NOT SET'}")
+    print(f"PERSONAL_EMAILS: {'SET' if cfg['PERSONAL_EMAILS'] else 'NOT SET'}")
 
     # Basic checks
-    if not cfg["RESEND_API_KEY"] or not cfg["EMAIL_FROM"] or not cfg["EMAIL_TO"]:
-        print("ERROR: Missing RESEND_API_KEY/EMAIL_FROM/EMAIL_TO in .env", file=sys.stderr)
+    if not cfg["RESEND_API_KEY"] or not cfg["EMAIL_FROM"]:
+        print("ERROR: Missing RESEND_API_KEY/EMAIL_FROM in .env", file=sys.stderr)
         print(f"RESEND_API_KEY present: {bool(cfg['RESEND_API_KEY'])}")
         print(f"EMAIL_FROM present: {bool(cfg['EMAIL_FROM'])}")
-        print(f"EMAIL_TO present: {bool(cfg['EMAIL_TO'])}")
         sys.exit(2)
+    
     return cfg
 
 
@@ -313,7 +333,7 @@ def yahoo_gap_scan(cfg):
     }
 
 
-def send_email(cfg, data):
+def send_email(cfg, data, to_emails=None):
     # Use Resend to send HTML tables and CSV attachment
     import resend
     import csv
@@ -496,7 +516,7 @@ def send_email(cfg, data):
         # Send the email using Resend with attachment
         params = {
             "from": cfg["EMAIL_FROM"],
-            "to": [cfg["EMAIL_TO"]],
+            "to": to_emails,
             "subject": subject,
             "html": html,
             "attachments": [
@@ -526,6 +546,9 @@ def main():
     print(f"Current working directory: {os.getcwd()}")
     print(f"Script started at: {datetime.now()}")
 
+    # Default command is 'email' if no arguments provided
+    command = sys.argv[1] if len(sys.argv) > 1 else 'email'
+
     try:
         cfg = load_env()
         print(f"Configuration loaded successfully. Using Yahoo Finance data source.")
@@ -534,7 +557,27 @@ def main():
         data = yahoo_gap_scan(cfg)
 
         print(f"Data collection complete. Sending email...")
-        send_email(cfg, data)
+        
+        if command == 'email':
+            # Send to personal recipients (PERSONAL_EMAILS)
+            to_emails = get_personal_emails(cfg)
+            if not to_emails:
+                print("ERROR: No personal email recipients specified. Set PERSONAL_EMAILS in .env", file=sys.stderr)
+                sys.exit(2)
+            print(f"Sending email to personal recipients: {len(to_emails)} recipient(s): {', '.join(to_emails)}")
+            send_email(cfg, data, to_emails)
+        elif command == 'email-all':
+            # Send to all recipients (RECEIVER_EMAIL_ADDRESS)
+            to_emails = get_all_recipients(cfg)
+            if not to_emails:
+                print("ERROR: No all email recipients specified. Set RECEIVER_EMAIL_ADDRESS in .env", file=sys.stderr)
+                sys.exit(2)
+            print(f"Sending email to all recipients: {len(to_emails)} recipient(s): {', '.join(to_emails)}")
+            send_email(cfg, data, to_emails)
+        else:
+            print(f"ERROR: Invalid command '{command}'. Use 'email' or 'email-all'", file=sys.stderr)
+            sys.exit(2)
+            
         print("Email sent successfully!")
 
     except Exception as e:
