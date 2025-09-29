@@ -1,2 +1,3 @@
 # Gap down stocks daily analysis - 9:15 AM ET timestamp + a few minutes
+50 12 * * * cd /app && python gap_down_email.py
 20 13 * * * cd /app && python gap_down_email.py

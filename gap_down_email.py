@@ -56,8 +56,6 @@ def load_env():
 
     cfg = {
         "TICKERS_CSV": os.getenv("TICKERS_CSV", "sp500_tickers.csv"),
-        "OPEN_HOUR": int(os.getenv("OPEN_HOUR", "9")),
-        "OPEN_MINUTE": int(os.getenv("OPEN_MINUTE", "15")),
         "MIN_GAP_DOWN_PCT": float(os.getenv("MIN_GAP_DOWN_PCT", "-5")),
         "MIN_GAP_UP_PCT": float(os.getenv("MIN_GAP_UP_PCT", "1")),
         "TESTING_MODE": os.getenv("TESTING_MODE", "false").lower() == "true",
@@ -69,8 +67,9 @@ def load_env():
 
     # Print config status (without revealing actual keys)
     print(f"TICKERS_CSV: {cfg['TICKERS_CSV']}")
-    print(f"OPEN_TIME: {cfg['OPEN_HOUR']:02d}:{cfg['OPEN_MINUTE']:02d} ET")
     print(f"TESTING_MODE: {cfg['TESTING_MODE']}")
+    print(f"GAP_DOWN_THRESHOLD: {cfg['MIN_GAP_DOWN_PCT']}%")
+    print(f"GAP_UP_THRESHOLD: {cfg['MIN_GAP_UP_PCT']}%")
     print(f"RESEND_API_KEY: {'SET' if cfg['RESEND_API_KEY'] else 'NOT SET'}")
     print(f"EMAIL_FROM: {'SET' if cfg['EMAIL_FROM'] else 'NOT SET'}")
     print(f"EMAIL_TO: {'SET' if cfg['EMAIL_TO'] else 'NOT SET'}")
@@ -86,79 +85,75 @@ def load_env():
 
 
 
-def get_market_open_price(ticker, open_hour, open_minute):
+def get_current_price(ticker):
     """
-    Get the most recent market open price for a ticker at the configured time.
-    Works regardless of when script is run (weekend, after hours, etc.)
+    Get the current price for a ticker at the current timestamp.
+    If markets are closed (weekends, after hours), gets the most recent available price.
     """
     try:
         import yfinance as yf
         import pytz
-
+        
         et_tz = pytz.timezone('US/Eastern')
         now_et = datetime.now(et_tz)
-
-        # Find the most recent weekday (Monday=0, Sunday=6)
-        days_back = 0
-        current_date = now_et.date()
-        while current_date.weekday() >= 5:  # Weekend
-            days_back += 1
-            current_date = (now_et - timedelta(days=days_back)).date()
-
-        # If today is a weekday but it's before the configured open time, use yesterday
-        if current_date == now_et.date() and (now_et.hour < open_hour or (now_et.hour == open_hour and now_et.minute < open_minute)):
-            days_back += 1
-            current_date = (now_et - timedelta(days=days_back)).date()
-            # Skip weekends
-            while current_date.weekday() >= 5:
-                days_back += 1
-                current_date = (now_et - timedelta(days=days_back)).date()
-
-        # Get several days of 1-minute data to ensure we capture the target date
-        start_date = (current_date - timedelta(days=2)).isoformat()
-        end_date = (current_date + timedelta(days=1)).isoformat()
-
-        df_minute = yf.download(ticker, start=start_date, end=end_date,
-                               interval="1m", auto_adjust=False,
-                               progress=False, prepost=True)
-
-        if df_minute is None or len(df_minute) == 0:
-            return None
-
-        # Look for exactly the configured open time on the target date
-        target_datetime = et_tz.localize(datetime.combine(current_date, datetime.min.time().replace(hour=open_hour, minute=open_minute)))
-
-        for timestamp, row in df_minute.iterrows():
-            if timestamp.tz is None:
-                timestamp = pytz.UTC.localize(timestamp)
-            timestamp_et = timestamp.astimezone(et_tz)
-
-            # Look for exactly the configured open time on target date
-            if (timestamp_et.date() == current_date and
-                timestamp_et.hour == open_hour and
-                timestamp_et.minute == open_minute):
-
-                try:
-                    # Handle MultiIndex columns when downloading single ticker
-                    if isinstance(df_minute.columns, pd.MultiIndex):
-                        close_price = row[('Close', ticker)]
-                    else:
-                        close_price = row['Close']
-
-                    if pd.notna(close_price):
-                        return {
-                            'price': float(close_price),
-                            'timestamp': timestamp_et,
-                            'source': 'market-open',
-                            'date': current_date
-                        }
-                except (KeyError, IndexError):
-                    continue
-
+        
+        # Get recent data to find the most current price available
+        # Use 1-minute data for current day, and daily data as fallback
+        
+        # Try to get recent minute data first (for intraday/overnight pricing)
+        try:
+            # Get last 5 days of minute data to capture weekend/overnight sessions
+            df_minute = yf.download(ticker, period="5d", interval="1m", 
+                                   auto_adjust=False, progress=False, prepost=True)
+            
+            if df_minute is not None and len(df_minute) > 0:
+                # Get the most recent price from minute data
+                latest_idx = df_minute.index[-1]
+                latest_row = df_minute.iloc[-1]
+                
+                # Convert timestamp to ET
+                if latest_idx.tz is None:
+                    latest_idx = pytz.UTC.localize(latest_idx)
+                latest_timestamp_et = latest_idx.astimezone(et_tz)
+                
+                # Get the close price from the most recent minute
+                if isinstance(df_minute.columns, pd.MultiIndex):
+                    current_price = latest_row[('Close', ticker)]
+                else:
+                    current_price = latest_row['Close']
+                
+                if pd.notna(current_price):
+                    return {
+                        'price': float(current_price),
+                        'timestamp': latest_timestamp_et,
+                        'source': 'current-minute',
+                        'date': latest_timestamp_et.date()
+                    }
+        
+        except Exception:
+            # Fallback to daily data if minute data fails
+            pass
+        
+        # Fallback: Get daily data for most recent close
+        df_daily = yf.download(ticker, period="5d", interval="1d", 
+                              auto_adjust=False, progress=False)
+        
+        if df_daily is not None and len(df_daily) > 0:
+            # Get the most recent trading day's close
+            latest_close = float(df_daily["Close"].iloc[-1].iloc[0] if hasattr(df_daily["Close"].iloc[-1], 'iloc') else df_daily["Close"].iloc[-1])
+            latest_date = df_daily.index[-1].date()
+            
+            return {
+                'price': latest_close,
+                'timestamp': now_et,  # Current time when we fetched it
+                'source': 'daily-close',
+                'date': latest_date
+            }
+        
         return None
-
+        
     except Exception as e:
-        print(f"Market open price fetch error for {ticker}: {e}")
+        print(f"Current price fetch error for {ticker}: {e}")
         return None
 
 def yahoo_gap_scan(cfg):
@@ -208,27 +203,29 @@ def yahoo_gap_scan(cfg):
             # Add a small delay to avoid rate limiting
             time.sleep(0.1)
 
-            # Get recent daily data to extract yesterday's close
+            # Get recent daily data to extract the most recent market close
             df = yf.download(t, period="5d", interval="1d", auto_adjust=False, progress=False)
-            if df is None or len(df) < 2:
+            if df is None or len(df) < 1:
                 failed_downloads += 1
                 continue
 
-            # Extract yesterday's close price
-            prev_close_price = float(df["Close"].iloc[-2].iloc[0] if hasattr(df["Close"].iloc[-2], 'iloc') else df["Close"].iloc[-2])
+            # The most recent row in daily data represents the most recent market close
+            # For Sunday evening, this would be Friday's close (since no Saturday trading)
+            # For Monday, this would still be Friday's close until Monday's market closes
+            prev_close_price = float(df["Close"].iloc[-1].iloc[0] if hasattr(df["Close"].iloc[-1], 'iloc') else df["Close"].iloc[-1])
 
-            # Try to get configured time price, fallback to regular open
-            today_open_price = float(df["Open"].iloc[-1].iloc[0] if hasattr(df["Open"].iloc[-1], 'iloc') else df["Open"].iloc[-1])
-            data_source = 'regular-open'
+            # Get current price (most recent available price)
+            current_price_data = get_current_price(t)
+            if current_price_data:
+                today_current_price = current_price_data['price']
+                data_source = current_price_data['source']
+            else:
+                # Fallback to daily open if current price unavailable
+                today_current_price = float(df["Open"].iloc[-1].iloc[0] if hasattr(df["Open"].iloc[-1], 'iloc') else df["Open"].iloc[-1])
+                data_source = 'daily-fallback'
 
-            # Try to get market open price at configured time
-            market_open_data = get_market_open_price(t, cfg['OPEN_HOUR'], cfg['OPEN_MINUTE'])
-            if market_open_data:
-                today_open_price = market_open_data['price']
-                data_source = 'market-open'
-
-            # Calculate gap percentage
-            gap_pct = (today_open_price - prev_close_price) / prev_close_price * 100.0
+            # Calculate gap percentage (current price vs previous close)
+            gap_pct = (today_current_price - prev_close_price) / prev_close_price * 100.0
             successful_downloads += 1
 
             # Create stock data entry
@@ -236,7 +233,7 @@ def yahoo_gap_scan(cfg):
                 "ticker": t,
                 "name": "",
                 "prev_close": prev_close_price,
-                "today_open": today_open_price,
+                "today_current": today_current_price,
                 "gap_pct": gap_pct,
                 "data_source": data_source,
             }
@@ -247,11 +244,11 @@ def yahoo_gap_scan(cfg):
             if gap_pct <= cfg["MIN_GAP_DOWN_PCT"]:
                 gap_down_rows.append(stock_data)
                 if len(gap_down_rows) <= 10:  # Show first 10 gap downs
-                    print(f"GAP DOWN: {t} ${prev_close_price:.2f} → ${today_open_price:.2f} ({gap_pct:+.2f}%)")
+                    print(f"GAP DOWN: {t} ${prev_close_price:.2f} → ${today_current_price:.2f} ({gap_pct:+.2f}%)")
             elif gap_pct >= cfg["MIN_GAP_UP_PCT"]:
                 gap_up_rows.append(stock_data)
                 if len(gap_up_rows) <= 10:  # Show first 10 gap ups
-                    print(f"GAP UP: {t} ${prev_close_price:.2f} → ${today_open_price:.2f} ({gap_pct:+.2f}%)")
+                    print(f"GAP UP: {t} ${prev_close_price:.2f} → ${today_current_price:.2f} ({gap_pct:+.2f}%)")
 
         except Exception as e:
             failed_downloads += 1
@@ -295,10 +292,11 @@ def yahoo_gap_scan(cfg):
     unique_gap_ups.sort(key=lambda x: x["gap_pct"], reverse=True)  # most positive first
     unique_all_data.sort(key=lambda x: x["gap_pct"])  # most negative first
 
-    # Display summary of market open data
-    market_open_count = len([s for s in unique_all_data if s.get('data_source') == 'market-open'])
-    regular_count = len(unique_all_data) - market_open_count
-    print(f"Data source breakdown: {cfg['OPEN_HOUR']:02d}:{cfg['OPEN_MINUTE']:02d} ET data: {market_open_count} | Regular open: {regular_count}")
+    # Display summary of current price data sources
+    current_minute_count = len([s for s in unique_all_data if s.get('data_source') == 'current-minute'])
+    daily_close_count = len([s for s in unique_all_data if s.get('data_source') == 'daily-close'])
+    daily_fallback_count = len([s for s in unique_all_data if s.get('data_source') == 'daily-fallback'])
+    print(f"Data source breakdown: Current minute: {current_minute_count} | Daily close: {daily_close_count} | Daily fallback: {daily_fallback_count}")
 
     return {
         "gap_downs": unique_gap_downs,
@@ -322,17 +320,17 @@ def send_email(cfg, data):
         if not rows:
             return f"<h3>{title}</h3><p>No stocks found.</p>"
 
-        ths = ["Ticker", "Prev Close", "Today Open", "$ Change", "Gap %"]
+        ths = ["Ticker", "Prev Close", "Today Current", "$ Change", "Gap %"]
         trs = []
         for r in rows:
-            dollar_change = r['today_open'] - r['prev_close']
+            dollar_change = r['today_current'] - r['prev_close']
             gap_color = "red" if r['gap_pct'] < color_threshold else "green" if r['gap_pct'] > color_threshold else "black"
             change_color = "red" if dollar_change < 0 else "green" if dollar_change > 0 else "black"
             trs.append(
                 f"<tr>"
                 f"<td><b>{r['ticker']}</b></td>"
                 f"<td>${r['prev_close']:.2f}</td>"
-                f"<td>${r['today_open']:.2f}</td>"
+                f"<td>${r['today_current']:.2f}</td>"
                 f"<td style='color:{change_color}'>${dollar_change:+.2f}</td>"
                 f"<td style='color:{gap_color}'>{r['gap_pct']:+.2f}%</td>"
                 f"</tr>"
@@ -344,34 +342,43 @@ def send_email(cfg, data):
         )
         return f"<h3>{title} ({len(rows)} stocks)</h3>" + html_table
 
-    # Build HTML content with proper trading day timestamps
+    # Build HTML content with current timestamp info
     et_tz = pytz.timezone('US/Eastern')
     now_et = datetime.now(et_tz)
-
-    # Determine the actual trading day for "today's" open timestamp
-    today_trading_day = now_et.date()
-    # If today is weekend, the "today" data is actually from Friday
-    while today_trading_day.weekday() >= 5:  # Weekend
-        today_trading_day = today_trading_day - timedelta(days=1)
-
-    # If today is a weekday but before market open time, we're looking at "today's" pre-market
-    # If it's after market open time, we might still be looking at "today" depending on when script runs
-    # The key insight: the script gets the most recent trading day's open price
-
-    # For "yesterday's" close, find the trading day before the "today" trading day
-    yesterday_trading_day = today_trading_day - timedelta(days=1)
-    while yesterday_trading_day.weekday() >= 5:  # Skip weekends
-        yesterday_trading_day = yesterday_trading_day - timedelta(days=1)
-
-    # Format the trading days for display
-    today_day_name = today_trading_day.strftime('%A')
-    yesterday_day_name = yesterday_trading_day.strftime('%A')
+    
+    # Find the most recent market close day
+    # This should be the most recent day when markets actually closed at 4pm ET
+    # For Sunday: Friday close (no Saturday trading)
+    # For Monday before 4pm: Friday close (Monday hasn't closed yet)
+    # For Monday after 4pm: Monday close (Monday has closed)
+    
+    # Start from today and work backwards to find the most recent trading day that has closed
+    previous_trading_day = now_et.date()
+    
+    # If today is a weekend, go back to the most recent trading day
+    while previous_trading_day.weekday() >= 5:  # Saturday=5, Sunday=6
+        previous_trading_day = previous_trading_day - timedelta(days=1)
+    
+    # If today is a weekday, we need to decide:
+    # - If markets haven't closed today yet (before 4pm), use previous day's close
+    # - If markets have closed today (after 4pm), use today's close
+    # For simplicity, let's always use the previous trading day's close for consistency
+    # since we're comparing current price vs "previous close"
+    if now_et.weekday() < 5:  # If today is a weekday
+        previous_trading_day = previous_trading_day - timedelta(days=1)
+        while previous_trading_day.weekday() >= 5:  # Skip weekends
+            previous_trading_day = previous_trading_day - timedelta(days=1)
+    
+    # Format the timestamps for display
+    current_time_str = now_et.strftime('%A, %Y-%m-%d at %I:%M %p ET')
+    previous_day_name = previous_trading_day.strftime('%A')
 
     html_parts = [
         f"<h2>Daily Gap Analysis - {datetime.now().strftime('%Y-%m-%d')}</h2>",
         f"<p><strong>Data Source:</strong> Yahoo Finance</p>",
-        f"<p><strong>Today's Open Timestamp:</strong> {today_day_name}, {today_trading_day.strftime('%Y-%m-%d')} at {cfg['OPEN_HOUR']:02d}:{cfg['OPEN_MINUTE']:02d} ET</p>",
-        f"<p><strong>Previous Close Timestamp:</strong> {yesterday_day_name}, {yesterday_trading_day.strftime('%Y-%m-%d')} at ~4:00 PM ET</p>",
+        f"<p><strong>Current Timestamp:</strong> {current_time_str}</p>",
+        f"<p><strong>Previous Close Timestamp:</strong> {previous_day_name}, {previous_trading_day.strftime('%Y-%m-%d')} at ~4:00 PM ET</p>",
+        f"<p><strong>Gap Calculation:</strong> Current price vs Previous close</p>",
         f"<p><strong>Gap Down Threshold:</strong> ≤ {cfg['MIN_GAP_DOWN_PCT']}%</p>",
         f"<p><strong>Gap Up Threshold:</strong> ≥ {cfg['MIN_GAP_UP_PCT']}%</p>",
         f"<p><strong>Total Stocks Analyzed:</strong> {len(all_data)}</p>",
@@ -382,8 +389,8 @@ def send_email(cfg, data):
 
     html = "".join(html_parts)
 
-    # Create subject line with proper format: [Daily Gaps] [MM/DD/YYYY] [x gap down, x gap up, stocks]
-    today_formatted = datetime.now().strftime('%m/%d/%Y')
+    # Create subject line with proper format: [Daily Gaps] [DD/MM/YYYY] [x gap down, x gap up, stocks]
+    today_formatted = datetime.now().strftime('%d/%m/%Y')
     total_stocks = len(all_data)
     subject = f"[Daily Gaps] [{today_formatted}] [{len(gap_downs)} gap down, {len(gap_ups)} gap up, {total_stocks} stocks]"
 
@@ -404,15 +411,15 @@ def send_email(cfg, data):
         print(f"\nPreparing Excel data for {len(sorted_data)} stocks...")
 
         for i, row in enumerate(sorted_data):
-            dollar_change = row['today_open'] - row['prev_close']
+            dollar_change = row['today_current'] - row['prev_close']
 
             excel_row = {
                 "Ticker": row["ticker"],
                 "Previous_Close": round(row['prev_close'], 2),
-                "Today_Open": round(row['today_open'], 2),
+                "Today_Current": round(row['today_current'], 2),
                 "Dollar_Change": round(dollar_change, 2),
                 "Gap_Percent": round(row['gap_pct'], 2),
-                "Data_Source": row.get('data_source', 'regular-open').replace('-', '_').upper(),
+                "Data_Source": row.get('data_source', 'current-minute').replace('-', '_').upper(),
                 "_gap_raw": row['gap_pct']  # Keep for highlighting logic
             }
             excel_data.append(excel_row)
