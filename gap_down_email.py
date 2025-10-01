@@ -122,6 +122,9 @@ def get_current_price(ticker):
         import yfinance as yf
         import pytz
 
+        # Set User-Agent to avoid being blocked by Yahoo Finance
+        yf.utils.get_user_agent = lambda: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+
         et_tz = pytz.timezone('US/Eastern')
         now_et = datetime.now(et_tz)
 
@@ -188,6 +191,9 @@ def yahoo_gap_scan(cfg):
     # Use yfinance with tickers from CSV file
     import yfinance as yf
     import pandas as pd
+
+    # Set User-Agent to avoid being blocked by Yahoo Finance
+    yf.utils.get_user_agent = lambda: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 
     # Use CSV file
     csv_path = cfg["TICKERS_CSV"]
