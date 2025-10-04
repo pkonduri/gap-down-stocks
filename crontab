@@ -4,5 +4,5 @@
 55 03 * * * cd /app && python gap_down_email.py email
 40 04 * * * cd /app && python gap_down_email.py email
 51 04 * * * cd /app && python gap_down_email.py email
-59 16 * * * cd /app && python gap_down_email.py email
+10 17 * * * cd /app && python gap_down_email.py email
 20 13 * * * cd /app && python gap_down_email.py email-all
