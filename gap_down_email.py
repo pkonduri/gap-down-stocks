@@ -419,7 +419,7 @@ def send_email(cfg, data, to_emails=None):
         f"<p><strong>Data Source:</strong> Yahoo Finance</p>",
         f"<p><strong>Current Timestamp:</strong> {current_time_str}</p>",
         f"<p><strong>Previous Close Timestamp:</strong> {previous_day_name}, {previous_trading_day.strftime('%Y-%m-%d')} at ~4:00 PM ET</p>",
-        f"<p><strong>Gap Calculation:</strong> Current price vs Previous close</p>",
+        f"<p><strong>Gap Calculation:</strong> Current price vs Previous close price</p>",
         f"<p><strong>Gap Down Threshold:</strong> ≤ {cfg['MIN_GAP_DOWN_PCT']}%</p>",
         f"<p><strong>Gap Up Threshold:</strong> ≥ {cfg['MIN_GAP_UP_PCT']}%</p>",
         f"<p><strong>Total Stocks Analyzed:</strong> {len(all_data)}</p>",
