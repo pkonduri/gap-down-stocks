@@ -298,6 +298,11 @@ def yahoo_gap_scan(cfg):
     print(f"Gap-up stocks found (≥{cfg['MIN_GAP_UP_PCT']}%): {len(gap_up_rows)}")
     print(f"{'='*80}\n")
 
+    # Early exit check
+    if successful_downloads == 0:
+        print("ERROR: No stocks were successfully processed. Cannot send email.", file=sys.stderr)
+        return None
+
     # Remove duplicates based on ticker (keep first occurrence)
     seen_tickers = set()
     unique_all_data = []
@@ -562,8 +567,12 @@ def main():
         print("Scanning for gap opportunities...")
         data = yahoo_gap_scan(cfg)
 
+        if data is None:
+            print("ERROR: Data collection failed. Exiting without sending email.", file=sys.stderr)
+            sys.exit(1)
+
         print(f"Data collection complete. Sending email...")
-        
+
         if command == 'email':
             # Send to personal recipients (PERSONAL_EMAILS)
             to_emails = get_personal_emails(cfg)
