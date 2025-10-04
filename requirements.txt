@@ -7,3 +7,4 @@ resend==0.6.0
 schedule==1.2.0
 pytz==2023.3
 openpyxl>=3.0.0
+Jinja2>=3.0.0

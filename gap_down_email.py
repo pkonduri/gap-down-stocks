@@ -208,6 +208,8 @@ def yahoo_gap_scan(cfg):
             if not row:
                 continue
             t = row[0].strip().upper()
+            # Replace . with - for Yahoo Finance compatibility (BRK.B -> BRK-B)
+            t = t.replace('.', '-')
             if t and t != "TICKER" and t not in seen_tickers:
                 tickers.append(t)
                 seen_tickers.add(t)
