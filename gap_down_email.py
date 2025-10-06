@@ -527,9 +527,13 @@ def send_email(cfg, data, to_emails=None):
         resend.api_key = cfg["RESEND_API_KEY"]
 
         # Send the email using Resend with attachment
+        from_name = "Market Mage"
+        from_header = f"{from_name} <{cfg['EMAIL_FROM']}>"
+
         params = {
-            "from": cfg["EMAIL_FROM"],
-            "to": to_emails,
+            "from": from_header,
+            "to": [cfg["EMAIL_FROM"]],  # Send to sender only in 'to' field
+            "bcc": to_emails,  # All recipients in BCC to hide addresses from each other
             "subject": subject,
             "html": html,
             "attachments": [
